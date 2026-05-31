@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -16,6 +17,12 @@ var (
 	ErrInvalidSyntax  = errors.New("ошибка: неверный синтаксис команды")
 )
 
+type ctxKey int
+
+const (
+	ctxKeyReqId ctxKey = iota
+)
+
 func main() {
 	cache := NewMyCache(1 * time.Second)
 	defer cache.Close()
@@ -28,17 +35,25 @@ func main() {
 
 	fmt.Println("Сервер кеша запущен на порту :12345...")
 
+	var requestCounter int64
+
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			log.Printf("Ошибка при принятии соединения: %v", err)
 			continue
 		}
-		go handleConnection(conn, cache)
+
+		requestCounter++
+
+		reqId := fmt.Sprintf("req-%d", requestCounter)
+		ctx := context.WithValue(context.Background(), ctxKeyReqId, reqId)
+
+		go handleConnection(ctx, conn, cache)
 	}
 }
 
-func handleConnection(conn net.Conn, cache Cache) {
+func handleConnection(ctx context.Context, conn net.Conn, cache Cache) {
 	defer conn.Close()
 
 	reader := bufio.NewReader(conn)
@@ -49,6 +64,9 @@ func handleConnection(conn net.Conn, cache Cache) {
 			log.Printf("Не удалось установить дедлайн: %v", err)
 			return
 		}
+
+		reqId := ctx.Value(ctxKeyReqId).(string)
+		log.Printf("[%s] Клиент %s подключился", reqId, conn.RemoteAddr())
 
 		request, err := reader.ReadString('\n')
 		if err != nil {
@@ -63,7 +81,7 @@ func handleConnection(conn net.Conn, cache Cache) {
 		}
 		request = strings.TrimSpace(request)
 
-		response, err := processCommand(request, cache)
+		response, err := processCommand(ctx, request, cache)
 		if err != nil {
 			fmt.Fprintf(conn, "%v\n", err)
 			continue
@@ -75,7 +93,10 @@ func handleConnection(conn net.Conn, cache Cache) {
 	}
 }
 
-func processCommand(req string, cache Cache) (string, error) {
+func processCommand(ctx context.Context, req string, cache Cache) (string, error) {
+
+	reqId := ctx.Value(ctxKeyReqId).(string)
+
 	parts := strings.Fields(req)
 	if len(parts) == 0 {
 		return "", ErrInvalidSyntax
@@ -83,6 +104,7 @@ func processCommand(req string, cache Cache) (string, error) {
 
 	command := strings.ToUpper(parts[0])
 
+	log.Printf("[%s] Выполнение команды: %s", reqId, command)
 	switch command {
 	case "SET":
 		// SET key value
