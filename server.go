@@ -8,7 +8,10 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/signal"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 )
 
@@ -37,20 +40,62 @@ func main() {
 
 	var requestCounter int64
 
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			log.Printf("Ошибка при принятии соединения: %v", err)
-			continue
+	var wg sync.WaitGroup
+
+	shutdown := make(chan struct{})
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	go func() {
+
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				select {
+				case <-shutdown:
+					return
+				default:
+
+					log.Printf("Ошибка при принятии соединения: %v", err)
+					continue
+
+				}
+			}
+
+			requestCounter++
+
+			reqId := fmt.Sprintf("req-%d", requestCounter)
+			ctx := context.WithValue(context.Background(), ctxKeyReqId, reqId)
+
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				handleConnection(ctx, conn, cache)
+			}()
 		}
+	}()
 
-		requestCounter++
+	<-sigChan //ожидаем что пользователь нажмёт Ctrl+C
+	fmt.Printf("\r\nПолучен сигнал остановки, начинаем плавное завершение\r\n")
 
-		reqId := fmt.Sprintf("req-%d", requestCounter)
-		ctx := context.WithValue(context.Background(), ctxKeyReqId, reqId)
+	close(shutdown)
+	listener.Close()
 
-		go handleConnection(ctx, conn, cache)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	waitChan := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(waitChan)
+	}()
+
+	select {
+	case <-waitChan:
+		fmt.Println("[SHUTDOWN] Все клиенты завершили работу")
+	case <-shutdownCtx.Done():
+		fmt.Println("[SHUTDOWN] Время ожидания истекло! Принудительное завершение")
 	}
+
 }
 
 func handleConnection(ctx context.Context, conn net.Conn, cache Cache) {
